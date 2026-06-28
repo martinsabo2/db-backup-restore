@@ -192,17 +192,27 @@ def _poll_async_operation(async_url: str, token: str, poll_seconds: int, timeout
     return "Timeout"
 
 
-def _find_latest_recovery_point_id(config: AppConfig, token: str, base_url: str) -> str:
+def _find_latest_recovery_point(config: AppConfig, token: str, base_url: str) -> dict[str, Optional[str]]:
     recovery_points_url = f"{base_url}/recoveryPoints?api-version={config.data_protection_api_version}"
     recovery_points_payload = _arm_get(recovery_points_url, token)
     recovery_points = recovery_points_payload.get("value", [])
     latest_recovery_point = _get_latest_recovery_point(recovery_points)
+
+    latest_recovery_point_props = latest_recovery_point.get("properties", {})
     recovery_point_id = latest_recovery_point.get("name")
+    recovery_point_time = latest_recovery_point_props.get("recoveryPointTime")
+    if not recovery_point_time:
+        recovery_point_time = latest_recovery_point_props.get("recoveryPointTimestamp")
+    policy_name = latest_recovery_point_props.get("policyName")
 
     if not recovery_point_id:
         raise ValueError("Latest recovery point response did not contain a recovery point ID.")
 
-    return recovery_point_id
+    return {
+        "id": str(recovery_point_id),
+        "recoveryPointTime": str(recovery_point_time) if recovery_point_time else None,
+        "policyName": str(policy_name) if policy_name else None,
+    }
 
 
 def _build_restore_request_and_url(config: AppConfig, base_url: str, recovery_point_id: str) -> tuple[dict[str, Any], str]:
@@ -248,7 +258,17 @@ def restore_from_last_recovery_point(config: AppConfig) -> None:
             f"Found resourceType='{datasource_type}'."
         )
 
-    recovery_point_id = _find_latest_recovery_point_id(config, token, base_url)
+    recovery_point = _find_latest_recovery_point(config, token, base_url)
+    recovery_point_id = recovery_point["id"]
+    recovery_point_time = recovery_point.get("recoveryPointTime") or "unknown"
+    policy_name = recovery_point.get("policyName") or "unknown"
+
+    logging.info(
+        "Using recovery point metadata: recoveryPointTime='%s', policyName='%s'.",
+        recovery_point_time,
+        policy_name,
+    )
+
     restore_request, restore_url = _build_restore_request_and_url(config, base_url, recovery_point_id)
     restore_response = _arm_post(restore_url, token, restore_request)
 
@@ -268,6 +288,7 @@ def restore_from_last_recovery_point(config: AppConfig) -> None:
         logging.info("Restore operation location: %s", location)
 
     if async_operation_url:
+        logging.info("Restore operation is asynchronous. Polling for completion...")
         final_status = _poll_async_operation(
             async_url=async_operation_url,
             token=token,
