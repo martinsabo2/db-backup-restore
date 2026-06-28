@@ -154,13 +154,17 @@ def _arm_bearer_token(credential: DefaultAzureCredential) -> str:
 
 
 def _arm_get(url: str, token: str) -> dict[str, Any]:
+    return _arm_get_response(url, token).json()
+
+
+def _arm_get_response(url: str, token: str) -> requests.Response:
     response = requests.get(
         url,
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
         timeout=60,
     )
     response.raise_for_status()
-    return response.json()
+    return response
 
 
 def _arm_post(url: str, token: str, body: dict[str, Any]) -> requests.Response:
@@ -174,14 +178,27 @@ def _arm_post(url: str, token: str, body: dict[str, Any]) -> requests.Response:
     return response
 
 
-def _poll_async_operation(async_url: str, token: str, poll_seconds: int, timeout_seconds: int) -> str:
+def _poll_async_operation(
+    async_url: str,
+    token: str,
+    poll_seconds: int,
+    timeout_seconds: int,
+) -> tuple[str, Optional[str], dict[str, Any]]:
     elapsed = 0
+    last_payload: dict[str, Any] = {}
     while elapsed <= timeout_seconds:
-        operation_result = _arm_get(async_url, token)
+        operation_response = _arm_get_response(async_url, token)
+        operation_result = operation_response.json()
+        last_payload = operation_result
         status = str(operation_result.get("status", "Unknown"))
         lowered = status.lower()
         if lowered in {"succeeded", "failed", "canceled", "cancelled"}:
-            return status
+            return status, _extract_job_id(operation_result), last_payload
+
+        if operation_response.status_code == 200:
+            job_id = _extract_job_id(operation_result)
+            if job_id:
+                return status, job_id, last_payload
 
         elapsed += poll_seconds
         # Use built-in clock sleep via requests' event loop is not available; fallback to simple wait.
@@ -189,7 +206,95 @@ def _poll_async_operation(async_url: str, token: str, poll_seconds: int, timeout
 
         time.sleep(poll_seconds)
 
-    return "Timeout"
+    return "Timeout", _extract_job_id(last_payload), last_payload
+
+
+def _extract_job_id(payload: Any) -> Optional[str]:
+    if not isinstance(payload, dict):
+        return None
+
+    job_id = payload.get("jobId") or payload.get("job_id")
+    if job_id is None:
+        properties = payload.get("properties")
+        if isinstance(properties, dict):
+            job_id = properties.get("jobId") or properties.get("job_id")
+    if job_id is None:
+        payload_id = payload.get("id")
+        if isinstance(payload_id, str) and "/backupJobs/" in payload_id:
+            job_id = payload_id
+
+    if job_id is None:
+        return None
+
+    job_id_text = str(job_id).strip()
+    return job_id_text or None
+
+
+def _build_backup_job_url(config: AppConfig, job_id: str) -> str:
+    job_id_text = job_id.strip()
+    if not job_id_text:
+        raise ValueError("job_id is required for backup job polling")
+
+    if job_id_text.startswith("http://") or job_id_text.startswith("https://"):
+        if "api-version=" in job_id_text:
+            return job_id_text
+        separator = "&" if "?" in job_id_text else "?"
+        return f"{job_id_text}{separator}api-version={config.data_protection_api_version}"
+
+    if job_id_text.startswith("/subscriptions/"):
+        return f"https://management.azure.com{job_id_text}?api-version={config.data_protection_api_version}"
+
+    vault_base = (
+        "https://management.azure.com"
+        f"/subscriptions/{config.subscription_id}"
+        f"/resourceGroups/{config.backup_vault_resource_group}"
+        f"/providers/Microsoft.DataProtection/backupVaults/{config.backup_vault_name}"
+    )
+    return f"{vault_base}/backupJobs/{job_id_text}?api-version={config.data_protection_api_version}"
+
+
+def _poll_backup_job_until_completed(config: AppConfig, token: str, job_id: str) -> str:
+    job_url = _build_backup_job_url(config, job_id)
+
+    success_statuses = {"completed", "completedwithwarnings", "succeeded", "success"}
+    failure_statuses = {"failed", "cancelled", "canceled"}
+
+    elapsed = 0
+    last_status = "Unknown"
+    while elapsed <= config.restore_poll_timeout_seconds:
+        payload = _arm_get(job_url, token)
+        properties = payload.get("properties", {}) if isinstance(payload, dict) else {}
+
+        status = properties.get("status") or payload.get("status") or "Unknown"
+        last_status = str(status)
+        normalized = last_status.replace(" ", "").lower()
+
+        sub_tasks = properties.get("extendedInfo", {}).get("subTasks", [])
+        if isinstance(sub_tasks, list) and sub_tasks:
+            task_summaries = []
+            for task in sub_tasks:
+                if not isinstance(task, dict):
+                    continue
+                task_name = str(task.get("taskName") or task.get("taskId") or "task")
+                task_status = str(task.get("taskStatus") or "Unknown")
+                task_summaries.append(f"{task_name}:{task_status}")
+            if task_summaries:
+                logging.info("Backup job tasks: %s", ", ".join(task_summaries))
+
+        if normalized in success_statuses:
+            return last_status
+        if normalized in failure_statuses:
+            raise RuntimeError(f"Backup job failed with status '{last_status}' for job_id '{job_id}'")
+
+        elapsed += config.restore_poll_seconds
+        import time
+
+        time.sleep(config.restore_poll_seconds)
+
+    raise RuntimeError(
+        "Timed out waiting for backup job completion. "
+        f"job_id='{job_id}', last_status='{last_status}', timeout_seconds={config.restore_poll_timeout_seconds}"
+    )
 
 
 def _find_latest_recovery_point(config: AppConfig, token: str, base_url: str) -> dict[str, Optional[str]]:
@@ -271,8 +376,13 @@ def restore_from_last_recovery_point(config: AppConfig) -> None:
 
     restore_request, restore_url = _build_restore_request_and_url(config, base_url, recovery_point_id)
     restore_response = _arm_post(restore_url, token, restore_request)
+    logging.info("restore_url: %s", restore_url)
+    logging.info("restore_response status_code: %s", restore_response.status_code)
+    logging.info("restore_response headers: %s", restore_response.headers)
+    logging.info("restore_response body: %s", restore_response.text)
 
     async_operation_url = restore_response.headers.get("Azure-AsyncOperation")
+    logging.info("async_operation_url: %s", async_operation_url)
     location = restore_response.headers.get("Location")
     body = restore_response.json() if restore_response.content else {}
     job_id = body.get("jobId")
@@ -289,17 +399,27 @@ def restore_from_last_recovery_point(config: AppConfig) -> None:
 
     if async_operation_url:
         logging.info("Restore operation is asynchronous. Polling for completion...")
-        final_status = _poll_async_operation(
+        final_status, async_job_id, async_payload = _poll_async_operation(
             async_url=async_operation_url,
             token=token,
             poll_seconds=config.restore_poll_seconds,
             timeout_seconds=config.restore_poll_timeout_seconds,
         )
+        if not job_id:
+            job_id = async_job_id or _extract_job_id(async_payload)
+        logging.info("job_id: %s", job_id)
         if final_status.lower() != "succeeded":
             raise RuntimeError(f"Restore operation did not succeed. Final status: {final_status}")
         logging.info("Restore operation finished with status: %s", final_status)
     else:
         logging.info("Restore API completed without async polling endpoint.")
+
+    if not job_id:
+        raise RuntimeError("Could not resolve restore backup job id from operation responses.")
+
+    logging.info("Polling backup job by job_id until completion: %s", job_id)
+    final_job_status = _poll_backup_job_until_completed(config, token, job_id)
+    logging.info("Backup job completed with final status: %s", final_job_status)
 
 
 def create_container(config: AppConfig) -> bool:
