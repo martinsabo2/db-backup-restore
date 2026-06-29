@@ -393,11 +393,11 @@ def restore_from_last_recovery_point(config: AppConfig) -> None:
     restore_response = _arm_post(restore_url, token, restore_request)
     logging.info("restore_url: %s", restore_url)
     logging.info("restore_response status_code: %s", restore_response.status_code)
-    logging.info("restore_response headers: %s", restore_response.headers)
+    logging.debug("restore_response headers: %s", restore_response.headers)
     logging.info("restore_response body: %s", restore_response.text)
 
     async_operation_url = restore_response.headers.get("Azure-AsyncOperation")
-    logging.info("async_operation_url: %s", async_operation_url)
+    # logging.info("async_operation_url: %s", async_operation_url)
     location = restore_response.headers.get("Location")
     body = restore_response.json() if restore_response.content else {}
     job_id = body.get("jobId")
@@ -409,8 +409,8 @@ def restore_from_last_recovery_point(config: AppConfig) -> None:
     )
     if job_id:
         logging.info("Restore job ID: %s", job_id)
-    if location:
-        logging.info("Restore operation location: %s", location)
+    # if location:
+    #    logging.info("Restore operation location: %s", location)
 
     if async_operation_url:
         logging.info("Restore operation is asynchronous. Polling for completion...")
