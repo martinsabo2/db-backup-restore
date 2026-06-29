@@ -1,6 +1,9 @@
 import logging
 import os
 import sys
+import requests
+
+from dotenv import load_dotenv
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Optional
@@ -8,8 +11,6 @@ from typing import Any, Optional
 from azure.core.exceptions import ClientAuthenticationError, HttpResponseError, ResourceExistsError
 from azure.identity import DefaultAzureCredential
 from azure.storage.blob import BlobServiceClient
-import requests
-
 
 @dataclass(frozen=True)
 class AppConfig:
@@ -449,6 +450,9 @@ def create_container(config: AppConfig) -> bool:
 
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+    # Load environment variables from .env file if present
+    load_dotenv()
 
     try:
         config = load_config()

@@ -41,7 +41,8 @@ pip install -r requirements.txt
 
 ## Configuration
 
-Copy `.env.example` values into your environment (or export directly in shell).
+`.env.example` contains environment variables used for configuration.
+The variable are automatically set by the script from the `.env` file.
 
 Required variables:
 
