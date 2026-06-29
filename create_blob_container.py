@@ -90,6 +90,20 @@ def load_config() -> AppConfig:
     except ValueError as exc:
         raise ValueError("AZURE_BACKUP_RESTORE_POLL_SECONDS and AZURE_BACKUP_RESTORE_TIMEOUT_SECONDS must be integers") from exc
 
+    logging.info(
+        """\n\nLoaded configuration:
+        Storage account name='%s' 
+        Blob container name='%s' 
+        Subscription id='%s' 
+        Backup vault name='%s' 
+        backup_instance_name='%s'\n""",
+        storage_account_name,
+        container_name,
+        subscription_id,
+        backup_vault_name,
+        backup_instance_name,
+    )
+
     return AppConfig(
         storage_account_name=storage_account_name,
         container_name=container_name,
