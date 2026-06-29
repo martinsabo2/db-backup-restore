@@ -357,6 +357,10 @@ def _build_restore_request_and_url(config: AppConfig, base_url: str, recovery_po
 
 
 def restore_from_last_recovery_point(config: AppConfig) -> None:
+    logging.info("*******************************************************************")
+    logging.info("*** RESTORING DATA INTO BLOB CONTAINER FROM LAST RECOVERY POINT ***")
+    logging.info("*******************************************************************")
+
     credential = DefaultAzureCredential(
         managed_identity_client_id=config.managed_identity_client_id,
         exclude_interactive_browser_credential=True,
@@ -438,6 +442,10 @@ def restore_from_last_recovery_point(config: AppConfig) -> None:
 
 
 def create_container(config: AppConfig) -> bool:
+    logging.info("*******************************")
+    logging.info("*** CREATING BLOG CONTAINER ***")
+    logging.info("*******************************")
+
     credential = DefaultAzureCredential(
         managed_identity_client_id=config.managed_identity_client_id,
         exclude_interactive_browser_credential=True,
